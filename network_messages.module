@@ -1,0 +1,271 @@
+<?php
+// $Id$
+
+define('NETWORK_MESSAGES_DATE_REGEX', '/(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})\s([\+\-]?\d{2})(\d{2})/');
+
+// Local timezone offset in seconds
+define('NETWORK_MESSAGES_DATE_TIMEZONE', 7200);
+
+// Define Node Fields used by Network Messages
+define('NETWORK_MESSAGES_DATE_TIME', 'field_date_time');
+define('NETWORK_MESSAGES_KEYWORD', 'field_keyword');
+define('NETWORK_MESSAGES_SERVICE_NAME', 'field_netservicename');
+
+/**
+ * Returns the list of managed data feeds keyed to content types
+ *
+ * The respective Data tables must have several supporting fields:
+ *   date, network, tariff
+ * And managed fields:
+ *  service_nid, profit
+ */
+function network_messages_services_list() {
+  return array(
+    'auction_service'      => 'feeds_data_auction_messages',
+    'campaign_service'     => 'feeds_data_campaign_messages',
+    'subscription_service' => 'feeds_data_subscription messages',
+  );
+}
+
+/**
+ * Implementation of hook_perm().
+ */
+function network_messages_perm() {
+  return array('view service statistics');
+}
+
+/**
+ * Implementation of hook_feeds_data_processor_targets_alter().
+ */
+function network_messages_feeds_data_processor_targets_alter(&$fields, $data_table) {
+  $list = network_messages_services_list();
+  if (array_search($data_table, $list) !== FALSE) {
+    $fields['service_nid']['callback'] = 'network_messages_set_target';
+    $fields['profit']['callback'] = 'network_messages_set_target';
+  }
+}
+
+/**
+ * Data Mapping callback.
+ */
+function network_messages_set_target(&$item, $element, $value) {
+  static $services = array();
+  static $providers = array();
+  if (empty($providers)) {
+    $providers = network_providers_list();
+  }
+  switch ($element) {
+    case 'service_nid':
+      $service_key = network_messages_get_service_by_name($value, $item['date']);
+	  // Campaigns / Subscriptions
+      if (!empty($item['service'])) {
+	    $service_key = $service_key ? $service_key : network_messages_get_service_by_key($item['service'], $item['date']);
+      }
+      $item[$element] = $service_key ? $service_key : 0;
+      break;
+    case 'profit':
+      $item[$element] = 0;
+      if ($item['direction'] == 'I') {
+        $rate = number_format($item['tariff'] / 100.00, 2, '.', '');
+        switch ($item['type']) {
+          case 'S':
+            $type = 'mss';
+            break;
+          case 'M':
+            $type = 'mms';
+            break;
+          default:
+            $type = NULL;
+        }
+        if ($providers[$item['network']][$rate] && $type != NULL) {
+          $charge = $providers[$item['network']][$rate][$type];
+        }
+        else {
+          $charge = $value / 100.00; // Check here
+        }
+		
+		// Service Found
+        if ($item['service_nid'] != 0) {
+          if (empty($services[$item['service_nid']])) {
+            $services[$item['service_nid']] = node_load($item['service_nid']);
+	      }
+	      $s = $services[$item['service_nid']];
+          $item[$element] = $item['tariff'] * (1 - $charge) * (100 - $s->field_operator_commission[0]['value'] - $s->field_btell_charge[0]['value']) / 100;
+	    }
+		// Orphaned Message
+		else {
+		  $item[$element] = $item['tariff'] * (1 - $charge);
+		}
+	  }
+      break;
+  }
+}
+
+/**
+ * Returns an array containing a datetime value and a second offset
+ */
+function network_messages_parse_date($date) {
+  $regs = array();
+  preg_match(NETWORK_MESSAGES_DATE_REGEX, $date, $regs);
+  
+  $value = array();
+  if (!empty($regs[1]) && !empty($regs[2]) && !empty($regs[3])) {
+    $value = array(
+	  'dt' => $regs[1],
+	  'tz' => /*NETWORK_MESSAGES_DATE_TIMEZONE*/ -60 * ($regs[2] * 60 + $regs[3]),
+	);
+  }
+  return $value;
+}
+ 
+/**
+ * Returns a service nid given a key and date string.
+ */
+function network_messages_get_service_by_key($key, $date) {
+//  module_load_include('inc', 'date_api', 'date_api_sql');
+  static $handler = array();
+  if (empty($handler)) {
+    $handler = date_field_get_sql_handler(content_fields(NETWORK_MESSAGES_DATE_TIME));
+  }
+
+  $datetime = network_messages_parse_date($date);
+  if (empty($datetime)) {
+    return;
+  }
+  $types = array_keys(network_messages_services_list());
+  $query = 'SELECT n.nid FROM {node} n '
+    .'INNER JOIN {content_'. NETWORK_MESSAGES_DATE_TIME .'} dt ON n.vid = dt.vid '
+    .'INNER JOIN {content_'. NETWORK_MESSAGES_KEYWORD .'} sk ON n.vid = sk.vid '
+    .'WHERE n.type IN ('. db_placeholders($types, 'varchar') .') AND '
+    .'LOWER(sk.'. NETWORK_MESSAGES_KEYWORD .'_value) = \'%s\' AND ' 
+    . $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value', '<', $datetime['dt'], $datetime['tz']) .' AND '
+    . $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value2', '>', $datetime['dt'], $datetime['tz']);
+  $types[] = strtolower($key);
+  return db_result(db_query($query, $types));
+}
+
+/**
+ * Returns a service nid given a service name and date string.
+ */
+function network_messages_get_service_by_name($key, $date) {
+//  module_load_include('inc', 'date_api', 'date_api_sql');
+  static $handler = array();
+  if (empty($handler)) {
+    $handler = date_field_get_sql_handler(content_fields(NETWORK_MESSAGES_DATE_TIME));
+  }
+
+  $datetime = network_messages_parse_date($date);
+  if (empty($datetime)) {
+    return;
+  }
+  $types = array_keys(network_messages_services_list());
+  $query = 'SELECT n.nid FROM {node} n '
+    .'INNER JOIN {content_'. NETWORK_MESSAGES_DATE_TIME .'} dt ON n.vid = dt.vid '
+    .'INNER JOIN {content_'. NETWORK_MESSAGES_SERVICE_NAME .'} sk ON n.vid = sk.vid '
+    .'WHERE n.type IN ('. db_placeholders($types, 'varchar') .') AND '
+    .'LOWER(sk.'. NETWORK_MESSAGES_SERVICE_NAME .'_value) = \'%s\' AND ' 
+    . $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value', '<', $datetime['dt'], $datetime['tz']) .' AND '
+    . $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value2', '>', $datetime['dt'], $datetime['tz']);
+  $types[] = strtolower($key);
+  return db_result(db_query($query, $types));
+}
+
+/**
+ * Returns a service nid based on a key and a date range.
+ */
+function network_messages_service_exists($key, $date_from, $date_to) {
+//  module_load_include('inc', 'date_api', 'date_api_sql');
+  static $handler = array();
+  if (empty($handler)) {
+    $handler = date_field_get_sql_handler(content_fields(NETWORK_MESSAGES_DATE_TIME));
+  }
+
+  $dt_from = network_messages_parse_date($date_from);
+  $dt_to = network_messages_parse_date($date_to);
+  if (empty($dt_from) || empty($dt_to)) {
+    return;
+  }
+  $types = array_keys(network_messages_services_list());
+  $query = 'SELECT n.nid FROM {node} n '
+    .'INNER JOIN {content_'. NETWORK_MESSAGES_DATE_TIME .'} dt ON n.vid = dt.vid '
+    .'INNER JOIN {content_'. NETWORK_MESSAGES_KEYWORD .'} sk ON n.vid = sk.vid '
+    .'WHERE n.type IN ('. db_placeholders($types, 'varchar') .') AND '
+    .'LOWER(sk.'. NETWORK_MESSAGES_KEYWORD .'_value) = \'%s\' AND '
+    .'('. $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value', '<=', $dt_from['dt'], $dt_from['tz']) .' AND '
+       . $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value2', '>=', $dt_from['dt'], $dt_from['tz']) .') OR '
+    .'('. $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value', '<=', $dt_to['dt'], $dt_to['tz']) .' AND '
+       . $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value2', '>=', $dt_to['dt'], $dt_to['tz']) .') OR '
+    .'('. $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value', '<=', $dt_from['dt'], $dt_from['tz']) .' AND '
+       . $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value2', '>=', $dt_to['dt'], $dt_to['tz']) .') OR '
+    .'('. $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value', '>', $dt_from['dt'], $dt_from['tz']) .' AND '
+       . $handler->sql_where_date('DATE', 'dt.'. NETWORK_MESSAGES_DATE_TIME .'_value2', '<', $dt_to['dt'], $dt_to['tz']) .')';
+  $types[] = strtolower($key);
+  $result = db_result(db_query($query, $types));
+  return $result ? $result : FALSE;
+}
+
+/**
+ * Returns message counts for a service nid and optional network.
+ */
+function network_messages_get_count($service, $nid, $network = NULL, $direction = 'I', $feed_nid = NULL) {
+  // Sanity check
+  $list = network_messages_services_list();
+  if (array_key_exists($service, $list) !== TRUE) {
+    return FALSE;
+  }
+  $query = 'SELECT COUNT(nm.id) FROM {'. $list[$service] .'} nm WHERE nm.service_nid = %d AND nm.direction = \'%s\' ';
+  $args = array($nid, $direction);
+  if ($network !== NULL) {
+    $query .= 'AND nm.network = \'%s\' ';
+	$args[] = $network;
+  }
+  if ($feed_nid !== NULL) {
+    $query .= 'AND nm.feed_nid = %d ';
+	$args[] = $feed_nid;
+  }
+  $query .= 'GROUP BY nm.service_nid';
+  return db_result(db_query($query, $args));
+}
+
+/**
+ * Returns total network message profits for a service nid.
+ */
+function network_messages_get_profit($service, $nid, $network = NULL, $direction = 'I', $feed_nid = NULL) {
+  // Sanity check
+  $list = network_messages_services_list();
+  if (array_key_exists($service, $list) !== TRUE) {
+    return FALSE;
+  }
+  $query = 'SELECT SUM(nm.profit) FROM {'. $list[$service] .'} nm WHERE nm.service_nid = %d AND nm.direction = \'%s\' ';
+  $args = array($nid, $direction);
+  if ($network !== NULL) {
+    $query .= 'AND nm.network = \'%s\' ';
+	$args[] = $network;
+  }
+  if ($feed_nid !== NULL) {
+    $query .= 'AND nm.feed_nid = %d ';
+	$args[] = $feed_nid;
+  }
+  $query .= 'GROUP BY nm.service_nid';
+  return db_result(db_query($query, $args));
+}
+
+/**
+ * Returns all service nids related to a given feed nid.
+ */
+function network_messages_get_feed_services($service, $feed_nid) {
+  // Sanity check
+  $list = network_messages_services_list();
+  if (array_key_exists($service, $list) !== TRUE) {
+    return FALSE;
+  }
+  $query = 'SELECT nm.service_nid FROM {'. $list[$service] .'} nm WHERE nm.feed_nid = %d GROUP BY nm.service_nid';
+  $results = db_query($query, array($feed_nid));
+  $services = array();
+  while ($result = db_fetch_object($results)) {
+    if ($result->service_nid != 0) {
+      $services[] = $result->service_nid;
+	}
+  }
+  return $services;
+}

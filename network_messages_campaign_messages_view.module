@@ -1,0 +1,3 @@
+<?php
+
+include_once('network_messages_campaign_messages_view.features.inc');

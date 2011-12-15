@@ -1,0 +1,7 @@
+; Network Messages
+name = "Network Messages"
+version = 6.x-v1.x-dev
+description = "Network Messages"
+core = 6.x
+package = "Network Messages"
+dependencies[] = "network_providers"
